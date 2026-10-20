@@ -1,6 +1,8 @@
 import { tool } from "ai";
 import { z } from "zod";
-import { ApiRequestError, createReturn, getCategories, getOrder, getProducts, preauthorizeRefund, notifyReturnInProcess } from "@/lib/api";
+import { ApiRequestError, createReturn, getCategories, getOrder, getProductById, getProductStock, getProducts, preauthorizeRefund, notifyReturnInProcess } from "@/lib/api";
+import { start } from "workflow/api";
+import { returnFlow } from "./workflows/return-flow";
 
 export const searchProducts = tool({
   description: `Search the Vercel swag store product catalog. Use this whenever the user asks about products, what the store sells, or wants recommendations. Optionally narrow results to a single category.`,
@@ -19,6 +21,7 @@ export const searchProducts = tool({
       ),
   }),
   execute: async ({ query, category }) => {
+    "use step";
     try {
       const products = await getProducts({
         search: query,
@@ -50,6 +53,7 @@ export const getAllCategories = tool({
   description: `List every product category available in the Vercel swag store, along with the number of products in each. Use this when the user asks what categories exist, what kinds of products are sold, or wants to browse the store at a high level.`,
   inputSchema: z.object({}),
   execute: async () => {
+    "use step";
     try {
       const categories = await getCategories();
       return {
@@ -81,19 +85,43 @@ export const returnOrder = tool({
       .describe("Why the user is returning the order."),
   }),
   execute: async ({ orderId, reason }) => {
+    "use step";
+    const run = await start(returnFlow, [orderId, reason]);
+    return { runId: run.runId, message: `Return request received for order ${orderId}.` };
+  },
+});
+
+export const getProductDetails = tool({
+  description: `Fetch the full details for a single product by its ID or slug, including every image, the full description, price, tags, and live stock levels. Use this when the user asks about a specific item (e.g. "tell me more about the black hoodie") — prefer it over searchProducts once you know which product they mean, since searchProducts only returns a summary.`,
+  inputSchema: z.object({
+    productId: z
+      .string()
+      .describe(
+        "The product's ID or slug, as returned by searchProducts (the id or slug field).",
+      ),
+  }),
+  execute: async ({ productId }) => {
+    "use step";
     try {
-      const order = await getOrder(orderId);
-      await notifyReturnInProcess(orderId);
-      await preauthorizeRefund(orderId);
-      const filed = await createReturn({
-        orderId: order.id,
-        items: order.items.map((i) => ({
-          productId: i.productId,
-          quantity: i.quantity,
-        })),
-        reason,
-      });
-      return { returnId: filed.id, status: filed.status };
+      const [product, stock] = await Promise.all([
+        getProductById(productId),
+        getProductStock(productId),
+      ]);
+      return {
+        id: product.id,
+        name: product.name,
+        slug: product.slug,
+        description: product.description,
+        price: product.price,
+        currency: product.currency,
+        category: product.category,
+        images: product.images,
+        tags: product.tags,
+        featured: product.featured,
+        stock: stock.stock,
+        inStock: stock.inStock,
+        lowStock: stock.lowStock,
+      };
     } catch (err) {
       const message =
         err instanceof ApiRequestError ? err.message : "Unknown error";
